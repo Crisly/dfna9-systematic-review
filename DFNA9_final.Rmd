@@ -1,0 +1,1023 @@
+---
+title: "DFNA9 genotype ~ phenotype analysis"
+author: "Cris Lanting"
+date: "09/03/2021"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+  fig_width: 6
+  html_document:
+    df_print: paged
+  word_document: default
+  toc: yes
+  toc_float: yes
+  fig_height: 4
+---
+# Introduction
+This [R Markdown](http://rmarkdown.rstudio.com) notebook is used to document the various aspects of the genotype-phenotype analysis in many subjects with hereditary hearing loss based on mutation in the DFNA9 gene. This notebooks is intended to leave a trail of the analyses done en to make it more reprodicible. It now covers the data cleaning, description of the data (group size, how many subjects per group, how many audiograms per subject), plots of the hearing thresholds across age and other descriptors of the data. 
+Title of the manuscript: 
+
+Genotype-phenotype correlations of pathogenic COCH variants in DFNA9: a HuGE systematic review and audiometric meta-analysis.
+
+Authors:
+Sybren M. M. Robijn, MD1,2 Jeroen J. Smits, MD1,2, Kadriye Sezer, MD1, Patrick L.M. Huygen, MSc, PhD1, Andy J. Beynon, MSc, PhD 1, Hannie Kremer PhD1,2,3, Erik de Vrieze MSc, PhD1,2, Cornelis P. Lanting, MSc, PhD 1,2, Ronald J.E. Pennings, MD, PhD1,2
+
+1Department of Otorhinolaryngology, Hearing & Genes, Radboud University Medical Center, Nijmegen, the Netherlands; 
+2Donders Institute for Brain, Cognition and Behaviour, Radboud University Medical Center, Nijmegen, The Netherlands, 3Department of Human Genetics, Radboud University Medical Center, Nijmegen.
+
+
+
+# Phenotype analysis on the pure tone avarage (PTA)
+## Load R-packages
+
+```{r}
+# not all packages may need to be loaded for this paper - some are imported for noodling around.
+library(ggplot2)
+library(ggthemr)
+library(ggthemes)
+library(drc)
+library(sjPlot)
+library(readxl) 
+library(nlme)
+library(lme4)
+library(knitr)
+library(kableExtra)
+library(forcats)
+library(tidyr)
+library(dplyr)
+library(broom)
+library(arsenal)
+library(nlstools)
+library(nlshelper)
+library(nls.multstart)
+library(stringr)
+library(purrr)
+library(modelr)
+library(ggpubr)
+ggthemr('fresh',type = 'inner')
+source('ggplot_theme_Publication-2.R')
+#[1] "#111111" "#65ADC2" "#233B43" "#E84646" "#C29365" "#362C21" "#316675" "#168E7F" "#109B37"
+```
+
+```{r,echo=FALSE,message=FALSE,warning=FALSE}
+# Set so that long lines in R will be wrapped:
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=80), tidy=TRUE)
+```
+
+```{r} 
+# Define a 2-parameter logistic function function with a fixed asymptotic value (==130 dB)
+FitFunc <- function(x, scal, xmid) {
+  130 / (1 + exp(-scal * (x - xmid)))
+}
+
+# Helper function to get the x-value (e.g. age), for wich a value of y (dB HL) is reached based on logistic function
+FitFunc_get <- function(y, scal, xmid) {
+  (-log((130 / y) - 1) / scal) + xmid
+}
+```
+
+## Load data and clean data-frames
+Load data from Excel file and select only relevant columns/rows. The first analyses will be based on pure-tone average (PTA). The selected subset dataframe consists of the columns patient id (pid), group (i.e. Domain and/or Geneticdiagnosis), age (Leeftijd), and the PTA (PTA54ADS).
+
+```{r}
+data_raw <- read_excel("../data/raw_data/database_30-11-2020.xlsx")
+#remove any spaces (UTF) esp for Pro51Ser
+data_raw$Geneticdiagnosis <-
+  gsub("(^[[:space:]]*)|([[:space:]]*$)",
+       "",
+       data_raw$Geneticdiagnosis)
+#make Domain a factor
+data_raw$Domain = factor(data_raw$Domain)
+data_raw$Geneticdiagnosis = factor(data_raw$Geneticdiagnosis)
+
+#P51S to Pro51Ser/F527C to Phe527Cys
+levels(data_raw$Geneticdiagnosis) <-
+  gsub("^p.P51S$", "p.Pro51Ser", levels(data_raw$Geneticdiagnosis))
+levels(data_raw$Geneticdiagnosis) <-
+  gsub("^p.F527C$",
+       "p.Phe527Cys",
+       levels(data_raw$Geneticdiagnosis))
+
+#leave out data with only n=1 dataset per domain/certain unpublished data.
+data_subset <-
+  subset(data_raw, Geneticdiagnosis != "c.292C>T(p.Arg98*) Homozygoot")
+
+data <-
+  subset(
+    data_subset,
+    select = c(
+      'pid',
+      'Familynrrec',
+      'Domain',
+      'Geneticdiagnosis',
+      'Leeftijd',
+      'PTA54ADS'
+    )
+  )
+
+#drop unused levels from a factor in a dataframe, e.g. Domains that have no entries anymore.
+data <- droplevels(data)
+
+# 1. Order based on domain
+data_subset_domain <- data %>%
+  mutate(Domain = fct_relevel(Domain,
+                              "LCCL",
+                              "Ivd1",
+                              "vWFA2"))
+
+# 2. Order based on variant and location on the COCH locus
+data_subset_domain_var <- data %>%
+  mutate(
+    Geneticdiagnosis = fct_relevel(
+      Geneticdiagnosis,
+      "p.Cys542Phe",
+      "p.Phe527Cys",
+      "p.Ala487Pro",
+      "p.Arg438Cys",
+      "p.Ile372Thr",
+      "p.Cys162Tyr",
+      "p.Val123Glu",
+      "p.Phe121Ser",
+      "p.Trp117Arg",
+      "p.Leu114Pro",
+      "p.Ile109Thr",
+      "p.Ile109Asn",
+      "p.Val92Asp",
+      "p.Gly88Glu",
+      "p.Gly87Trp",
+      "p.Gly87Val",
+      "p.Ala76Thr",
+      "p.Val66Gly",
+      "p.Pro51Ser",
+      "p.Gly38Asp"
+    )
+  )
+
+# 3. Reverse order
+data_subset_rev <- data_subset_domain_var %>%
+  mutate(Geneticdiagnosis = fct_rev(Geneticdiagnosis))
+# save processed and cleaned data
+save(data, file = "../data/processed_data/data_pta_age_group.Rda")
+head(data_subset_rev)
+```
+```{r}
+# Show all variants
+variants = unique(data_subset_rev$Geneticdiagnosis)
+variants
+# Print a table and save to a pdf file
+kable(variants, caption = "Pathogenic COCH variants",) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F) %>%
+  kable_styling(latex_options = "striped") %>%
+  save_kable("../results/table/table_variants.pdf")
+```
+
+## Descriptive statistics - number of subject/domain
+```{r}
+library(dplyr)
+t1 <-
+  data_subset_domain %>%                # take the data.frame "data"
+  filter(!is.na(pid)) %>%     # Using "data", filter out all rows with NAs in pid
+  group_by(Domain) %>%         # Then, with the filtered data, group it by "Domain"
+  summarise("Number of subjects" = n_distinct(pid))  # Now summarise with unique elements per group
+t1
+```
+
+
+```{r}
+# Show table
+kable(t1, caption = "The number of subjects per domain",) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F) %>%
+  kable_styling(latex_options = "striped") %>%
+  save_kable("../results/table/table1.pdf")
+```
+## Descriptive statistics - number of subject/genetic mutation
+Filter by domain and genetic diagnosis - how many subjects have which variant?
+```{r}
+t1a <- data_subset_rev %>%                # take the data.frame "data"
+  filter(!is.na(pid)) %>%     # Using "data", filter out all rows with NAs in pid
+  group_by(Geneticdiagnosis, Domain) %>%         # Then, with the filtered data, group it by "Domain"
+  #mutate(sorted = sort(Geneticdiagnosis, decreasing = TRUE)) %>%
+  #mutate(sorted = sort(Domain, decreasing = TRUE)) %>%
+  dplyr::summarise(nsub = n_distinct(pid)) #%>%  # Now summarise with unique elements per group
+#arrange(desc(nsub))
+
+kable(t1a, caption = "The number of subjects per mutation",) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F) %>%
+  kable_styling(latex_options = "striped") %>%
+  save_kable("../results/table/table1a.pdf")
+t1a
+```
+
+And plot the table as a bar graph.
+```{r, fig.width=6, fig.height=4}  
+t1a_ord_domain <- t1a %>% mutate(Domain = fct_relevel(Domain,
+                                                      "LCCL",
+                                                      "Ivd1",
+                                                      "vWFA2"))
+
+# order based on # of patients
+ggplot(data = t1a_ord_domain, aes(x = reorder(Geneticdiagnosis, nsub), nsub, fill =
+                                    Domain)) +
+  geom_bar(stat = "identity") +
+  #facet_wrap( ~ Domain) +
+  coord_flip() +
+  xlab("Variant") +
+  ylab("Patients") + ggtitle("Distribution of the variants in the three domains\nof DFNA9")+
+  theme_Publication() 
+dev.print(pdf, '../results/barplott_number_pid_by_gen.pdf')
+```
+
+
+```{r, fig.width=6, fig.height=4} 
+# Now sorted on domain, not on #patients
+ggplot(data = t1a_ord_domain, aes(x = Geneticdiagnosis, y = nsub, fill =
+                                    Domain)) +
+  geom_bar(stat = "identity") +
+  #facet_wrap( ~ Domain) +
+  coord_flip() +
+  xlab("Variant") +
+  ylab("Patients") + ggtitle("Distribution of the variants in the three domains\nof DFNA9") +
+  scale_color_discrete(breaks = c("LCCL", "Ivd1", "vWFA2"))+
+  theme_Publication() 
+dev.print(pdf, '../results/barplott_number_by_gen.pdf')
+```
+
+Make a summary table with some descriptive statistics (age, HL quantiles)
+```{r}
+summary_table <- data_subset_domain %>%
+  group_by(Domain, Geneticdiagnosis) %>%
+  summarize(
+    nsub = n_distinct(pid),
+    mean_age = mean(Leeftijd),
+    Q1 = quantile(Leeftijd, 0.25),
+    median = quantile(Leeftijd, 0.5),
+    Q3 = quantile(Leeftijd, 0.75),
+    PTA_mean = mean(PTA54ADS)
+  ) %>%  # Now summarise with unique elements per group
+  arrange(Domain, desc(nsub))
+summary_table
+
+summary_table_domain <- data_subset_domain %>%
+  group_by(Domain) %>%
+  summarize(
+    nsub = n_distinct(pid),
+    mean_age = mean(Leeftijd),
+    Q1 = quantile(Leeftijd, 0.25),
+    median = quantile(Leeftijd, 0.5),
+    Q3 = quantile(Leeftijd, 0.75),
+    PTA_mean = mean(PTA54ADS)
+  ) %>%  # Now summarise with unique elements per group
+  arrange(Domain, desc(nsub))
+summary_table_domain
+```
+
+## Descriptive statistics - number of measurements/subject
+Next, create a table and histogram of the number of measurements for each subject id (pid) across all groups.
+```{r}
+num_meas_per_id <-
+  aggregate(PTA54ADS ~ pid , data_subset_rev, function(x)
+    length(unique(x)))
+t2 <- table(num_meas_per_id$PTA54ADS)
+kable(t2,
+      caption = "The number of subjects that each have n audiograms",
+      col.names = c("# audiograms", "# subjects")) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F) %>%
+  kable_styling(latex_options = "striped") %>%
+  save_kable("../results/table/table2.pdf")
+t2
+sum(t2[2:13])
+```
+In total there are `r sum(t2)` subjects with `r dim(data)[1]`  measurements; `r t2[1]` patients with only 1 measurement and `r sum(t2[2:12])` patients with 2 or more measurements, see e.g. table 1 or the histogram.
+
+Now make a histogram of the distribution of the number of audiograms per patients in each of the groups. It shows that although we have longitudinal data in some cases, the majority of data is based on a small number of measurements (n<5)
+
+```{r}
+# Number (n) of counts (i.e. audiograms) per subject (pid)
+summarytable <-
+  data_subset_domain %>%                # take the data.frame "data"
+  filter(!is.na(pid)) %>%     # Using "data", filter out all rows with NAs in pid
+  #group_by(Geneticdiagnosis, Domain) %>%
+  count(Domain, pid)
+
+ggplot(data = summarytable, aes(x = n, fill = Domain)) +
+  geom_histogram(binwidth = 1) +
+  facet_wrap(~ Domain) +
+  xlab("Number of audiograms/patient") +
+  ylab("Number of patients") + ggtitle("Distribution of number of audiograms per subject\nfor the different domains")
+dev.print(pdf, '../results/histogram_number_meas_pid.pdf')
+```
+
+
+## Model fits of PTA with age
+Perform fits to the data; Try to fit the data with a linear function, a power-law function and a logistic function. Compare power-law fit and the logistic functione and display the results in an ANOVA-table
+
+```{r}
+# 1. Lin fit
+lin_fit <-
+  nls(PTA54ADS ~ a * Leeftijd + b,
+      data = data_subset_domain_var,
+      start = list(a = 1.5, b = 0))
+summary(lin_fit)
+
+```
+```{r}
+# 2. power-law
+nls_fit <- nls(PTA54ADS ~ a * Leeftijd ^ b,
+               data = data_subset_domain_var,
+               start = list(a = 0.05, b = 1.5))
+summary(nls_fit)
+```
+
+```{r}
+# 3-parameter self-starting SSLogis function
+startvec <- c(Asym = 120, xmid = 50, scal = 15)
+nls_logis <- nls(PTA54ADS ~ SSlogis(Leeftijd, Asym, xmid, scal),
+                 data = data_subset_domain_var,
+                 start = startvec)
+summary(nls_logis)
+```
+
+Now with a two-parameter fit
+```{r}
+#custom function
+nls_fitfunc <- nls(
+  PTA54ADS ~ FitFunc(Leeftijd, scal, xmid),
+  data = data_subset_domain_var,
+  start = c(scal = 0.05, xmid = 60)
+)
+summary(nls_fitfunc)
+sum <- summary(nls_fitfunc)
+age_xmid = sum$coefficients[2, 1]
+scale_xmid = sum$coefficients[1, 1]
+age_25 = FitFunc_get(25, scale_xmid, age_xmid)
+print(age_25)
+print(130 * scale_xmid / 4)
+```
+
+```{r}
+# compare the 2- and 3-parameter logistic fit.
+anova(nls_logis,nls_fitfunc)
+```
+Base on results above, the function with a pre-determined asymptotic value (Asym), i.e. FitFunc, is not better or worse than the function where it is a free paramter (i.e. SSlogis). In the following we thus take the more parsimonious function with fewer parameters.
+
+## Fit per domain
+The main questions is whether the function that describes the PTA (dB HL) as a function of age (years) differs between the domains within the Coch-gene. Start with a group-fit; discarding grouping information
+```{r}
+fit0 <-
+  #nls(PTA54ADS ~ SSlogis(Leeftijd, Asym, xmid, scal), data = data)
+  nls(
+    PTA54ADS ~ FitFunc(Leeftijd, scal, xmid),
+    data = data_subset_domain_var,
+    start = c(scal = 0.05, xmid = 60)
+  )
+summary(fit0)
+```
+Also, check the age where the hearing loss crosses an arbitrary threshold, in this case the 25 dB threshold, which is the criterion for which a hearing aid considered to be of use according to the WHO (https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6796665/ especially table 1)
+
+Is there a significant difference between the domains? Therefore, add a grouping-variable with a variable mid-point (xmid)
+```{r}
+fit1 <- nls(
+  #PTA54ADS ~ SSlogis(Leeftijd, Asym, xmid[group], scal),
+  PTA54ADS ~ FitFunc(Leeftijd, scal, xmid[Domain]),
+  data = data_subset_domain_var,
+  start = list(xmid = rep(50, 3),
+               scal = rep(0.05, 1))
+)
+summary(fit1)
+```
+The midpoint seems to differ. Now, add the scaling [scal] as a grouping variable; does it futher explain differences between groups?
+
+```{r}
+fit2 <-
+  nls(
+    #PTA54ADS ~ SSlogis(Leeftijd, Asym, xmid[group], scal[group]),
+    PTA54ADS ~ FitFunc(Leeftijd, scal[Domain], xmid[Domain]),
+    data = data_subset_domain_var,
+    start = list(#Asym = rep(120, 1),
+      xmid = rep(50, 3),
+      scal = rep(0.05, 3))
+  )
+summary(fit2)
+```
+
+Now test the various models. Which of the parameters explain the data best?
+```{r}
+anova(fit0, fit1, fit2)
+```
+It turns out the both the variables [xmid] and [scale], i.e. the midpoint and slope at the midpoint significantly differ between the three groups and that adding a different midpoint and scale (related to the slope at the midpoint) is best for characterizing the differences between the groups (F = 17.1; p = 5.53e-8). Fit the data and plot the results:
+
+## Fit per domain with/without CIs
+First a fit without confidence intervals
+
+```{r}
+newdat = expand.grid(Leeftijd = seq(0, 100, by = 1),
+                     Domain = c("Ivd1", "LCCL", "vWFA2"))
+newdat$fit <- predict(fit2, newdata = newdat)
+# some calculations/conversions
+xmid1 <- coef(fit2)[1]
+xmid2 <- coef(fit2)[2]
+xmid3 <- coef(fit2)[3]
+scal1 <- coef(fit2)[4]
+scal2 <- coef(fit2)[5]
+scal3  <- coef(fit2)[6]
+
+# get values for the age-limit at which the HL exceeds 25 dB (https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6796665/)
+x1 <- FitFunc_get(25, scal1, xmid1)
+x2 <- FitFunc_get(25, scal2, xmid2)
+x3 <- FitFunc_get(25, scal3, xmid3)
+
+# add labels
+lab_lccl <-
+  paste("LCCL", "\n",  format(round(x2, 1), nsmall = 1), " y")
+lab_ivd1 <-
+  paste("Ivd1", "\n",  format(round(x1, 1), nsmall = 1), " y")
+lab_vwfa2 <-
+  paste("vWFA2", "\n",  format(round(x3, 1), nsmall = 1), " y")
+data$Domain <-
+  factor(data$Domain, levels = c("LCCL", "Ivd1", "vWFA2"))
+
+# plot panel A
+p1a <- ggplot(data_subset_domain,
+              aes(
+                x = Leeftijd,
+                y = PTA54ADS,
+                group = pid,
+                color = Domain
+              )) +
+  geom_point(aes(colour = factor(Domain)), alpha = 0.35) +
+  geom_line(data = data, size = 0.4, alpha = 0.5) +
+  geom_line(data = newdat,
+            aes(
+              y = fit,
+              group = Domain,
+              colour = factor(Domain)
+            ),
+            size = 2) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    color = 'black',
+    size = 0.5
+  ) +
+  
+  annotate(
+    geom = "curve",
+    x = 10,
+    y = 60,
+    xend = x1,
+    yend = 25,
+    curvature = .2,
+    arrow = arrow(length = unit(2, "mm"))
+  ) +
+  annotate(
+    geom = "text",
+    x = 8,
+    y = 60,
+    label = lab_ivd1,
+    hjust = "right",
+    size = 4,
+    fontface = "italic"
+  ) +
+  
+  annotate(
+    geom = "curve",
+    x = 22,
+    y = 80,
+    xend = x2,
+    yend = 25,
+    curvature = .2,
+    arrow = arrow(length = unit(2, "mm"))
+  ) +
+  annotate(
+    geom = "text",
+    x = 20,
+    y = 80,
+    label = lab_lccl,
+    hjust = "right",
+    size = 4,
+    fontface = "italic"
+  ) +
+  
+  annotate(
+    geom = "curve",
+    x = 10,
+    y = 40,
+    xend = x3,
+    yend = 25,
+    curvature = .2,
+    arrow = arrow(length = unit(2, "mm"))
+  ) +
+  annotate(
+    geom = "text",
+    x = 8,
+    y = 40,
+    label = lab_vwfa2,
+    hjust = "right",
+    size = 4,
+    fontface = "italic"
+  ) +
+  
+  geom_segment(
+    aes(
+      x = 0,
+      y = 25,
+      xend = 100,
+      yend = 25
+    ),
+    linetype = "dashed",
+    color = '#111111',
+    size = 0.2,
+    alpha = 0.5
+  ) +
+  scale_x_continuous(breaks = seq(0, 100, 20)) +
+  scale_y_reverse(breaks = seq(0, 120, 20), limits = c(130, -10)) +
+  xlab("Age (years)") +
+  ylab("PTA 0.5-4 kHz (dB HL)")
+p1a
+dev.print(pdf, '../results/pta_age_pid_Domain_fits.pdf')
+```
+
+## Plot - all datapoints for each mutation, one panel per domain.
+Plot all data and connect longitudinal data with a line. Each variant has a different color. Clearly visible is the variation both across variants and within variants (across patients).
+
+```{r}
+# Create a custom color scale
+# each genetic diagnosis now has a different color for a supplemental figure
+data$col <- as.numeric(data$Geneticdiagnosis)
+ggplot(data, aes(
+  x = Leeftijd,
+  y = PTA54ADS,
+  group = pid,
+  color = col
+)) +
+  geom_point(aes(colour = col), alpha = 0.4) +
+  scale_colour_gradientn(colours = rainbow(19)) +
+  geom_line(data = data, size = 1, alpha = .4) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    color = 'black',
+    alpha = 0.6
+  ) +
+  facet_wrap( ~ Domain) +
+  scale_x_continuous(breaks = seq(0, 100, 20)) +
+  scale_y_reverse(breaks = seq(-10, 130, 20), limits = c(130, -10)) +
+  xlab("Age (years)") +
+  ylab("PTA (dB HL)")
+#theme_light()
+#theme_classic() +
+#theme_minimal()
+dev.print(pdf, '../results/pta_age_pid_gen_by_domain.pdf')
+```
+
+## Plot - all datapoints, one panel for each domain
+Plot the same data, but now a panel for each domain.
+```{r}
+(
+  split_plot <- ggplot(
+    data_subset_domain,
+    aes(
+      x = Leeftijd,
+      y = PTA54ADS,
+      group = pid,
+      color = Domain
+    )
+  ) +
+    geom_point(aes(colour = factor(Domain))) +
+    facet_wrap( ~ Domain) +
+    geom_line(data = data, alpha = .4) +
+    geom_hline(
+      yintercept = 0,
+      linetype = "dashed",
+      color = 'black',
+      alpha = 0.4
+    ) +
+    scale_x_continuous(breaks = seq(0, 100, 20)) +
+    scale_y_reverse(breaks = seq(-10, 130, 20), limits = c(130, -10)) +
+    xlab("Age (years)") +
+    ylab("PTA (dB HL)")
+)
+dev.print(pdf, '../results/pta_age_pid_groups_split.pdf')
+```
+
+## Subset data (n>5 datapoints)
+Filter the data. Select only variants where we have more than 5 datapoints (both across/within patients). Only 14/18 variants have enough datapoints.
+```{r}
+d1 <- data_subset_domain_var %>%
+  group_by(Domain,Geneticdiagnosis) %>%
+  filter(n() >5)  #select only where there are more >5 datapoints
+d1
+
+```
+
+## Tables and Statistics - number of subject/domain
+Again, make a table of the number of subjects per domain such that each variant has >5 datapoints.
+```{r}
+t4 <- d1 %>%                # take the data.frame "data"
+  filter(!is.na(pid)) %>%     # Using "data", filter out all rows with NAs in pid
+  group_by(Domain) %>%         # Then, with the filtered data, group it by "Domain"
+  summarise("Number of subjects" = n_distinct(pid))  # Now summarise with unique elements per group
+
+kable(t4, caption = "The number of subjects per domain (n>5 datapoints)", ) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F) %>%
+  kable_styling(latex_options = "striped") %>%
+  save_kable("../results/table/table4.pdf")
+t4
+
+t5 <- d1 %>%                # take the data.frame "data"
+  filter(!is.na(pid)) %>%     # Using "data", filter out all rows with NAs in pid
+  group_by(Geneticdiagnosis) %>%         # Then, with the filtered data, group it by "Domain"
+  summarise("Number of subjects" = n_distinct(pid))  # Now summarise with unique elements per group
+
+kable(t5, caption = "The number of subjects per domain (n>5 datapoints)", ) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F) %>%
+  kable_styling(latex_options = "striped") %>%
+  save_kable("../results/table/table5.pdf")
+t5
+```
+
+## Domain-specific Fitting: get a fit for each domain
+Select all data; only take subset when fitting individual variants. First across the domains.
+                                   
+```{r}
+# Either unfiltered by number of subjects (data); or filtered by n>5 (d1)
+fits_domain <- d1 %>% #data %>%
+  group_by(., Domain) %>%
+  nest() %>%
+  mutate(fit = purrr::map(
+    data,
+    ~ nls_multstart(
+      PTA54ADS ~ FitFunc(Leeftijd, scal, xmid),
+      data = .x,
+      iter = 500,
+      start_lower = c(scal = 0.001, xmid = 05),
+      start_upper = c(scal = 1, xmid = 80),
+      supp_errors = 'N',
+      na.action = na.omit,
+      lower = c(scal = 0.001, xmid = 05)
+    )
+  ))
+
+params <- fits_domain %>%
+  mutate(., p = map(fit, tidy)) %>%
+  unnest(p)
+
+# get confidence intervals
+CI <- fits_domain %>%
+  mutate(.,
+         cis = map(fit, confint2),
+         cis = map(cis, data.frame)) %>%
+  unnest(cis) %>%
+  rename(., conf.low = X2.5.., conf.high = X97.5..) %>%
+  group_by(., Domain) %>%
+  mutate(., term = c('scal', 'xmid')) %>%
+  ungroup()
+
+params <- merge(params, CI, by = intersect(names(params), names(CI)))
+
+# get predictions
+preds <- fits_domain %>%
+  mutate(., p = map(fit, augment)) %>%
+  unnest(p)
+
+# new data frame of predictions
+new_preds <- data %>%
+  do(., data.frame(
+    Leeftijd = seq(0, 100, by = 1),
+    stringsAsFactors = FALSE
+  ))
+
+params_more <-
+  merge(x = params,
+        y = summary_table_domain[, 1:2],
+        by = "Domain",
+        all = TRUE)
+p2 <- na.omit(params_more)
+
+p2 %>%
+  select(Domain, term, estimate, conf.low, conf.high)
+
+#order by domain, then genetic variant
+p2$fn <- factor(p2$Domain, ordered = TRUE)
+
+p2_scal <- p2[p2$term == "scal", ]
+p2_scal$estimate_k = 130 * p2_scal$estimate / 4
+p2_scal$estimate.low = 130 * p2_scal$conf.low / 4
+p2_scal$estimate.high = 130 * p2_scal$conf.high / 4
+p2_scal_k = subset(p2_scal, select = -c(estimate, conf.low, conf.high))
+
+#fit_params$onset = FitFunc_get(35,fit_params$scal,fit_params$xmid)
+p2_xmid <- p2[p2$term == "xmid", ]
+p2_xmid$estimate_k = FitFunc_get(25, p2_scal$estimate, p2_xmid$estimate)
+p2_xmid$estimate.low = FitFunc_get(25, p2_scal$estimate, p2_xmid$conf.low)
+p2_xmid$estimate.high = FitFunc_get(25, p2_scal$estimate, p2_xmid$conf.high)
+p2_xmid_k = subset(p2_xmid, select = -c(estimate, conf.low, conf.high))
+
+pfinal = rbind(p2_scal_k, p2_xmid_k)
+pfinal
+```
+
+```{r}
+# Figure: get the parameter estimates for the fits across each domain and plot it along with their confidence intervals
+df <- pfinal %>%
+     mutate(term = recode(term, xmid = "Onset (year)",
+                                scal = "Slope (dB/year)"
+     )
+)
+
+mean_terms <- df %>% group_by(term) %>% 
+  summarize(mean_val = mean(estimate_k))
+mean_terms
+  
+ggplot(df, aes(color=Domain)) +
+    geom_point(aes(fn,estimate_k),size=2) +
+    facet_wrap(~ term, scale = 'free_x', ncol = 2) +
+    geom_linerange(aes(fn,ymin = estimate.low, ymax = estimate.high)) +
+    #geom_hline(data=mean_terms, aes(yintercept=mean_val), color='black', linetype="dashed")+
+    #geom_line(aes(x=fn, y = mean(estimate_k)))+
+    #geom_hline(aes(yintercept=mean(estimate_k), colour="grey50"))+
+    coord_flip() +
+    
+    theme_bw(base_size = 12) +
+    theme(legend.position = 'top') +
+    xlab('Domain') +
+    ylab('Parameter estimate (mean and 95% confidence interval)')
+dev.print(pdf, '../results/param_est_per_gen_domain.pdf.pdf')
+df
+```
+
+## Variant-specific fitting: get a fit for each variant/mutation 
+From here we apply a 2-parameter logistic function to the data. Each variant is fitted separately to get the midpoint (xmid) and scale (scal) indicative of the slope of the function fit at the midpoint. These values can be converted to a age-of-onset (arbitrarily set at the age at which the PTA crosses 25 dB), and a slope (progression in dB/year):
+```{r}
+models2p <-
+  nlsList(
+    PTA54ADS ~ FitFunc(Leeftijd, scal, xmid) | Geneticdiagnosis,
+    data = d1,
+    start = c(scal = 0.05, xmid = 40)
+  )
+models2p
+#models2p$onset = FitFunc_get(35,models2p$scal,models2p$xmid)
+#models2p$slope = 130 * models2p$scal/4 
+fit_params = coef(models2p)
+
+#convert parameters to onset (year) when 25 dB is crossed and calculate the slope (at midpoint!)
+fit_params$onset = FitFunc_get(25,fit_params$scal,fit_params$xmid)
+fit_params$slope = 130 * fit_params$scal/4
+
+fitted = fit_params[-c(1:2)]
+fitted_f <- fitted[order(fitted$onset),]
+colnames(fitted_f ) <- c("onset (years)", "slope (dB/year)")
+fitted_f
+
+kable(fitted_f, caption = "Fit-parameters", digits = 2) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F) %>%
+  kable_styling(latex_options = "striped") %>%
+  save_kable("../results/table/table_fits.pdf")
+
+#also break up for visualisation within each domain.
+d_LCCL <- subset(d1, Domain=='LCCL')
+d_Ivd1 <- subset(d1, Domain=='Ivd1')
+d_vWFA2 <- subset(d1, Domain=='vWFA2')
+
+models2p_LCCL <- nlsList(
+    PTA54ADS ~ FitFunc(Leeftijd, scal, xmid) | Geneticdiagnosis,
+    data = d_LCCL,
+    start = c(scal = 0.05, xmid = 40)
+  )
+#models2p_LCCL
+
+models2p_Ivd1 <- nlsList(
+    PTA54ADS ~ FitFunc(Leeftijd, scal, xmid) | Geneticdiagnosis,
+    data = d_Ivd1,
+    start = c(scal = 0.05, xmid = 40)
+  )
+
+models2p_vWFA2 <- nlsList(
+    PTA54ADS ~ FitFunc(Leeftijd, scal, xmid) | Geneticdiagnosis,
+    data = d_vWFA2,
+    start = c(scal = 0.05, xmid = 40)
+  )
+```
+
+## Select data (n>5) fitted by variant one big model + CIs
+Using purrr and nls_multstart we can fit the data again using the same function but with a robust fit.
+```{r}
+glimpse(d1)
+fits <- d1 %>%
+  group_by(., Geneticdiagnosis) %>%
+  nest() %>%
+  mutate(fit = purrr::map(
+    data,
+    ~ nls_multstart(
+      PTA54ADS ~ FitFunc(Leeftijd, scal, xmid),
+      data = .x,
+      iter = 500,
+      start_lower = c(scal = 0.001, xmid = 05),
+      start_upper = c(scal = 1, xmid = 80),
+      supp_errors = 'N',
+      na.action = na.omit,
+      lower = c(scal = 0.001, xmid = 05)
+    )
+  ))
+#some of the data results in error as some of the initial fits may not be optimal at all: don't worry, we won't be able to fit all variants.
+```
+
+Some fits results in an error - for now we don't have to worry about this.
+Now use the output to calculate the confidence intervals of the fit-parameters.
+```{r}
+params <- fits %>%
+  mutate(., p = map(fit, tidy)) %>%
+  unnest(p)
+
+# get confidence intervals
+CI <- fits %>%
+  mutate(.,
+         cis = map(fit, confint2),
+         cis = map(cis, data.frame)) %>%
+  unnest(cis) %>%
+  rename(., conf.low = X2.5.., conf.high = X97.5..) %>%
+  group_by(., Geneticdiagnosis) %>%
+  mutate(., term = c('scal', 'xmid')) %>%
+  ungroup()
+CI
+params <-
+  merge(params, CI, by = intersect(names(params), names(CI)))
+
+# get predictions
+preds <- fits %>%
+  mutate(., p = map(fit, augment)) %>%
+  unnest(p)
+```
+
+## Variant-specific predictions and confidence intervals 
+Now make a prediction for each of the variants.
+```{r}
+# new data frame of predictions
+new_preds <- d1 %>%
+  do(., data.frame(
+    Leeftijd = seq(0, 100, by = 1),
+    stringsAsFactors = FALSE
+  ))
+
+# max and min for each curve
+max_min <- group_by(d1, Geneticdiagnosis) %>%
+  summarise(.,
+            min_Leeftijd = min(Leeftijd),
+            max_Leeftijd = max(Leeftijd)) %>%
+  ungroup()
+
+params_more <-
+  merge(x = params,
+        y = summary_table[, 1:2],
+        by = "Geneticdiagnosis",
+        all = TRUE)
+p2 <- na.omit(params_more)
+p2_order = p2 %>% arrange(Domain) %>%    # First sort by val. This sort the dataframe but NOT the factor levels
+  mutate(name = factor(Geneticdiagnosis))
+p2_order
+```
+
+Convert the confidence intervals of the fit-parameters to that of the derived values for slope and age-of-onset.
+
+```{r}
+p2 %>%
+  select(Geneticdiagnosis, term, estimate, conf.low, conf.high)
+#order by domain, then genetic variant
+p2$fn <-
+  factor(p2$Geneticdiagnosis,
+         levels = unique(p2$Geneticdiagnosis[order(p2$Domain)]),
+         ordered = TRUE)
+
+p2_scal <- p2[p2$term == "scal", ]
+p2_scal$estimate_k = 130 * p2_scal$estimate / 4
+p2_scal$estimate.low = 130 * p2_scal$conf.low / 4
+p2_scal$estimate.high = 130 * p2_scal$conf.high / 4
+p2_scal_k = subset(p2_scal, select = -c(estimate, conf.low, conf.high))
+
+#fit_params$onset = FitFunc_get(35,fit_params$scal,fit_params$xmid)
+p2_xmid <- p2[p2$term == "xmid", ]
+p2_xmid$estimate_k = FitFunc_get(25, p2_scal$estimate, p2_xmid$estimate)
+p2_xmid$estimate.low = FitFunc_get(25, p2_scal$estimate, p2_xmid$conf.low)
+p2_xmid$estimate.high = FitFunc_get(25, p2_scal$estimate, p2_xmid$conf.high)
+p2_xmid_k = subset(p2_xmid, select = -c(estimate, conf.low, conf.high))
+
+pfinal = rbind(p2_scal_k, p2_xmid_k)
+#pfinal
+df <- pfinal %>%
+  mutate(term = recode(term, xmid = "Onset (year)",
+                       scal = "Slope (dB/year)"))
+#write.csv(df, file ="../results/fit_parmams.txt")
+
+```
+
+## Fit per variant
+Plot the effect sizes and their confidence intervals for each of the variants, ordered by domain:
+```{r}
+df
+mean_terms <- df %>% group_by(Domain,term) %>% 
+  summarize(mean_val = mean(estimate_k))
+mean_terms
+
+df$Domain <- factor(df$Domain, levels = c("LCCL", "Ivd1", "vWFA2"))
+
+p1b <- df %>%
+  mutate(
+    name = fct_relevel(
+      fn,
+      "p.Cys542Phe",
+      "p.Ala487Pro",
+      "p.Arg438Cys",
+      "p.Ile372Thr",
+      "p.Cys162Tyr",
+      "p.Phe121Ser",
+      "p.Trp117Arg",
+      "p.Ile109Thr",
+      "p.Ile109Asn",
+      "p.Val92Asp",
+      "p.Gly88Glu",
+      "p.Gly87Trp",
+      "p.Gly87Val",
+      "p.Val66Gly",
+      "p.Pro51Ser",
+    )
+  ) %>%
+  ggplot(aes(color = Domain)) +
+  geom_point(aes(name, estimate_k), size = 2) +
+  facet_wrap( ~ term, scale = 'free_x', ncol = 2) +
+  geom_linerange(aes(fn, ymin = estimate.low, ymax = estimate.high)) +
+  #geom_hline(data = mean_terms, aes(yintercept = mean_val, color = Domain),linetype = "dotdash") +
+  #geom_line(aes(x=fn, y = mean(estimate_k)))+
+  geom_hline(yintercept = 0,
+             color = 'black',
+             alpha = 0.6, size=0.2) +
+  coord_flip() +
+  theme_bw(base_size = 12) +
+  theme(legend.position = 'top') +
+  xlab('Variant') +
+  ylab('Age of onset (year) and slope (dB/year)') +
+  theme(panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank()) 
+p1b
+dev.print(pdf, '../results/param_est_per_gen_mutation.pdf')
+
+```
+```{r}
+df2 <- select(df, Domain, fn, term, estimate_k,estimate.low,estimate.high)
+df2
+library("writexl")
+write_xlsx(df2,"export_params.xlsx")
+
+```
+Now combine plots to make publication-ready figures
+```{r, fig.width=5, fig.height=3}  
+ggarrange(p1a, p1b,
+          labels = c("A", "B"),
+          ncol = 2, nrow = 1, 
+          common.legend = TRUE, legend = "bottom")
+dev.print(pdf, '../results/combined_fig_fit_estimates.pdf')
+
+```
+Finally, plot all data and fits ordered by variant:
+```{r}
+
+le <- unique(d1$Geneticdiagnosis)
+af <- unique(d1$Domain)
+newdat = expand.grid(Leeftijd = seq(0, 100, by = 1), Geneticdiagnosis = le)
+newdat$prednlm <- predict(models2p,newdata=newdat)
+
+ggplot(data = data_subset_domain,  aes(x = Leeftijd, y = PTA54ADS)) +
+  #scale_colour_gradientn(colours=rainbow(21)) +
+  #geom_line(data = data, size = 1, alpha = .4) +
+  geom_point(aes(color = Domain), size = 1, alpha = 0.5) +
+  geom_line(
+    data = newdat,
+    aes(y = prednlm),
+    color = 'black',
+    size = 1.0,
+    alpha = 0.5
+  ) +
+  #geom_point(aes(colour = col)) +
+  #facet_wrap( ~ Domain) +
+  facet_wrap( ~ Geneticdiagnosis) +
+  geom_hline(yintercept = 0,
+             color = 'grey',
+             linetype = "dashed") +
+  scale_x_continuous(breaks = seq(0, 100, 25)) +
+  scale_y_reverse(breaks = seq(0, 120, 40), limits = c(130,-10)) +
+  #scale_y_reverse(limits=c(130,-10)) +
+  xlab("Age (years)") +
+  ylab("PTA 0.5-4 kHz (dB HL)") +
+  theme_light()
+dev.print(pdf, '../results/test_panels_fits_per_gen_mutation.pdf')
+```
+
+# Code Appendix
+
+```{r getlabels, echo = FALSE}
+labs = knitr::all_labels()
+labs = labs[!labs %in% c("setup", "toc", "getlabels", "allcode")]
+```
+
+```{r allcode, ref.label = labs, eval = FALSE}
+```
